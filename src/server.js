@@ -42,7 +42,10 @@ const io = new SocketIOServer(server, {
 const PORT = process.env.PORT || 4000; // Port for the server to listen on
 
 // ---------- HTTP Endpoints --------------------------------------------------
-
+// Basic root endpoint – handy for browsers or simple uptime checks
+app.get('/', (req, res) => {
+	res.send(`<h1>Quiz Socket Server</h1><p>Status: running on port ${PORT}</p>`);
+});
 /**
  * Health check endpoint
  * - status: 'ok' if running
