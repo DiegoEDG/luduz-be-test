@@ -20,7 +20,7 @@ app.use(helmet());
 // Enable CORS for HTTP routes (restrict origin as needed)
 app.use(
 	cors({
-		origin: process.env.FRONTEND_URL || '*'
+		origin: process.env.FRONTEND_URL || process.env.FRONTEND_URL2 || '*'
 	})
 );
 
