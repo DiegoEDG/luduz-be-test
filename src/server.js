@@ -2,19 +2,60 @@
 
 // -- Dependencies ------------------------------------------------------------
 import express from 'express'; // Express web framework
+import cors from 'cors'; // Enable CORS for HTTP routes
+import helmet from 'helmet'; // Security headers
+import rateLimit from 'express-rate-limit'; // Rate limiting middleware
 import http from 'http'; // Node's HTTP server
 import { nanoid } from 'nanoid'; // For generating unique IDs
-import { Server as SocketIOServer } from 'socket.io';
+import { Server as SocketIOServer } from 'socket.io'; // Socket.IO server
 import { loadSessions, saveSessions } from './fileStore.js'; // Persistence helpers
 
 // -- App & Server Setup -----------------------------------------------------
 const app = express(); // Create an Express app
 const server = http.createServer(app); // Wrap in HTTP server for Socket.IO
 
-// Initialize Socket.IO, allow all origins (CORS)
-const io = new SocketIOServer(server, { cors: { origin: '*' } });
+// Apply security middleware
+app.use(helmet());
+
+// Enable CORS for HTTP routes (restrict origin as needed)
+app.use(
+	cors({
+		origin: process.env.FRONTEND_URL || '*'
+	})
+);
+
+// Rate limiting for HTTP endpoints
+app.use(
+	rateLimit({
+		windowMs: 15 * 60 * 1000, // 15 minutes
+		max: 100 // limit each IP to 100 requests per window
+	})
+);
+
+// Initialize Socket.IO with CORS for WebSocket connections
+const io = new SocketIOServer(server, {
+	cors: {
+		origin: process.env.FRONTEND_URL || '*'
+	}
+});
 
 const PORT = process.env.PORT || 4000; // Port for the server to listen on
+
+// ---------- HTTP Endpoints --------------------------------------------------
+
+/**
+ * Health check endpoint
+ * - status: 'ok' if running
+ * - uptime: seconds since process start
+ * - timestamp: current ISO timestamp
+ */
+app.get('/health', (req, res) => {
+	res.json({
+		status: 'ok',
+		uptime: process.uptime(),
+		timestamp: new Date().toISOString()
+	});
+});
 
 // ---------- persistent store ----------
 // Load existing sessions (from disk or memory)
@@ -29,7 +70,7 @@ sessions = Object.fromEntries(
 // Helper to save and broadcast session state to a room
 function broadcast(code) {
 	saveSessions(sessions); // Persist to disk
-	io.to(code).emit('sessionUpdate', sessions[code]); // Emit update event
+	io.to(code).emit('sessionUpdate', sessions[code]);
 	console.log('📡  sessionUpdate →', code, sessions[code].players.length, 'players');
 }
 
@@ -47,49 +88,51 @@ io.on('connection', (socket) => {
 			code,
 			name: sessionName,
 			hostPlayerId: playerId,
-			players: [player], // Host is first player
+			players: [player],
 			createdAt: new Date().toISOString(),
 			isActive: false // Locked when host starts
 		};
 
-		sessions[code] = session; // Store session
-		socket.join(code); // Join socket.io "room"
-		socket.data = { code, playerId }; // Attach metadata
+		sessions[code] = session;
+		socket.join(code);
+		socket.data = { code, playerId };
 
 		socket.emit('createSessionResponse', { session, player });
-		broadcast(code); // Notify everyone in room (just host now)
+		broadcast(code);
 	});
 
 	// 2️⃣ Player joins an existing session
 	socket.on('joinSession', ({ code, nickname }) => {
 		const session = sessions[code];
-		// Reject if not found or already active
 		if (!session || session.isActive) return socket.emit('error', 'Session not found or already started');
 
 		const playerId = nanoid();
 		const player = { id: playerId, nickname, score: 0, isHost: false };
 
-		session.players.push(player); // Add new player
+		session.players.push(player);
 		socket.join(code);
 		socket.data = { code, playerId };
 
 		socket.emit('joinSessionResponse', { session, player });
-		broadcast(code); // Notify all players of updated roster
+		broadcast(code);
 	});
 
 	// 3️⃣ Re-join after refresh or hiccup (state reconciliation)
 	socket.on('rejoinSession', ({ code, playerId, nickname }) => {
-		const session = sessions[code]; // Must exist
+		const session = sessions[code];
 		if (!session) return;
 
 		let player = session.players.find((p) => p.id === playerId);
 
 		if (!player) {
-			// If missing, re-create with original host flag
-			player = { id: playerId, nickname, score: 0, isHost: playerId === session.hostPlayerId };
+			player = {
+				id: playerId,
+				nickname,
+				score: 0,
+				isHost: playerId === session.hostPlayerId
+			};
 			session.players.push(player);
 		} else {
-			// Restore nickname & host status
 			player.isHost = playerId === session.hostPlayerId;
 			player.nickname = nickname;
 		}
@@ -107,7 +150,7 @@ io.on('connection', (socket) => {
 		const session = sessions[code];
 		if (!session || session.isActive) return;
 		session.isActive = true;
-		broadcast(code); // Update lobby state
+		broadcast(code);
 		io.to(code).emit('sessionStarted');
 		console.log('🎮 sessionStarted →', code);
 	});
@@ -118,8 +161,8 @@ io.on('connection', (socket) => {
 		if (!session || !session.isActive) return;
 		const player = session.players.find((p) => p.id === playerId);
 		if (!player) return;
-		player.score = score; // Set new score
-		broadcast(code); // Broadcast changes
+		player.score = score;
+		broadcast(code);
 	});
 
 	// 6️⃣ Player leaves session voluntarily
@@ -136,7 +179,6 @@ io.on('connection', (socket) => {
 		const { code, playerId } = socket.data || {};
 		const session = sessions[code];
 		if (session) {
-			// Remove non-host only
 			if (playerId !== session.hostPlayerId) {
 				session.players = session.players.filter((p) => p.id !== playerId);
 			}
@@ -145,6 +187,23 @@ io.on('connection', (socket) => {
 		console.log('⛔ socket disconnected:', socket.id);
 	});
 });
+
+// Global HTTP error handler
+app.use((err, req, res, next) => {
+	console.error('Unhandled error:', err);
+	res.status(500).json({ error: 'Internal Server Error' });
+});
+
+// Graceful shutdown
+const shutdown = () => {
+	console.log('🛑 Graceful shutdown initiated');
+	server.close(() => {
+		io.close();
+		process.exit(0);
+	});
+};
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
 
 // ---------- start server ----------
 server.listen(PORT, () => console.log(`🚀  Server running on port ${PORT}`));
