@@ -8,13 +8,6 @@
 		"outDir": "./dist",
 		"strict": true
 	},
-	"include": [
-		"src/**/*.ts",
-		"src/server.js",
-		"src/tempTypes.js",
-		"src/session.js",
-		"src/helpers.js",
-		"src/constants.js"
-	],
+	"include": ["src/**/*.ts", "server.js", "src/tempTypes.js", "src/session.js", "src/helpers.js", "src/constants.js"],
 	"exclude": ["node_modules"]
 }
